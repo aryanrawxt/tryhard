@@ -71,7 +71,6 @@ def safe_send_message(cl, gid, msg):
 def safe_change_title_direct(cl, gid, new_title):
     """Try the high-level instagrapi method first (if available)."""
     try:
-        # instagrapi has helper method `.direct_thread(...).update_title(...)`
         tt = cl.direct_thread(int(gid))
         try:
             tt.update_title(new_title)
@@ -81,8 +80,6 @@ def safe_change_title_direct(cl, gid, new_title):
             log(f"⚠ direct .update_title() failed for {gid} — will attempt GraphQL fallback")
     except Exception:
         pass
-
-    # GraphQL fallback (uses private API)
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -114,14 +111,11 @@ def safe_change_title_direct(cl, gid, new_title):
         log(f"⚠ Unexpected fallback error for title change {gid}: {e}")
         return False
 
-# --------- Alternating message cycle with robust error handling ----------
 def alternating_messages_loop(cl1, cl2, groups):
     if not groups:
         log("⚠ No groups for messaging loop.")
         return
-
     while True:
-        # Account 1 turn
         try:
             for gid in groups:
                 for _ in range(BURST_COUNT):
@@ -133,13 +127,10 @@ def alternating_messages_loop(cl1, cl2, groups):
                 time.sleep(0.5)
         except Exception as e:
             log(f"❌ Exception in Account1 message loop: {e}")
-
         try:
             time.sleep(DELAY_BETWEEN_MSGS)
         except Exception:
             pass
-
-        # Account 2 turn
         try:
             for gid in groups:
                 for _ in range(BURST_COUNT):
@@ -151,20 +142,16 @@ def alternating_messages_loop(cl1, cl2, groups):
                 time.sleep(0.5)
         except Exception as e:
             log(f"❌ Exception in Account2 message loop: {e}")
-
         try:
             time.sleep(DELAY_BETWEEN_MSGS)
         except Exception:
             pass
 
-# --------- Alternating title-change loop with robust error handling ----------
 def alternating_title_loop(cl1, cl2, groups, titles_map):
     if not groups:
         log("⚠ No groups for title loop.")
         return
-
     while True:
-        # Account 1 turn
         try:
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
@@ -178,8 +165,6 @@ def alternating_title_loop(cl1, cl2, groups, titles_map):
                         pass
         except Exception as e:
             log(f"❌ Exception in Account1 title loop: {e}")
-
-        # Account 2 turn
         try:
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
@@ -194,7 +179,6 @@ def alternating_title_loop(cl1, cl2, groups, titles_map):
         except Exception as e:
             log(f"❌ Exception in Account2 title loop: {e}")
 
-# --------- Self-ping thread (keeps Render awake) ----------
 def self_ping_loop():
     while True:
         if SELF_URL:
@@ -205,22 +189,17 @@ def self_ping_loop():
                 log(f"⚠ Self ping failed: {e}")
         time.sleep(SELF_PING_INTERVAL)
 
-# --------- Orchestration / starter ----------
 def start_bot():
-    log(f"STARTUP: SESSION_ID_1={SESSION_ID_1}, SESSION_ID_2={SESSION_ID_2}, GROUP_IDS={GROUP_IDS}")
-    # decode session ids automatically
+    log(f"STARTUP: SESSION_ID_1={repr(SESSION_ID_1)}, SESSION_ID_2={repr(SESSION_ID_2)}, GROUP_IDS={repr(GROUP_IDS)}, MESSAGE_TEXT={repr(MESSAGE_TEXT)}")
     s1 = decode_session(SESSION_ID_1)
     s2 = decode_session(SESSION_ID_2)
-
     if not s1 or not s2:
         log("❌ SESSION_ID_1 and SESSION_ID_2 are required in environment")
         return
-
     groups = [g.strip() for g in GROUP_IDS.split(",") if g.strip()]
     if not groups:
         log("❌ GROUP_IDS is empty or invalid")
         return
-
     titles_map = {}
     raw_titles = os.getenv("GROUP_TITLES", "")
     if raw_titles:
@@ -228,7 +207,6 @@ def start_bot():
             titles_map = json.loads(raw_titles)
         except Exception as e:
             log(f"⚠ GROUP_TITLES JSON parse error: {e}. Using fallback titles.")
-
     log("🔐 Logging in account 1...")
     cl1 = login_session(s1, "acc1")
     if not cl1:
@@ -239,32 +217,36 @@ def start_bot():
     if not cl2:
         log("❌ Account 2 login failed — aborting start")
         return
-
     try:
         t1 = threading.Thread(target=alternating_messages_loop, args=(cl1, cl2, groups), daemon=True)
         t1.start()
         log("▶ Started alternating message thread")
     except Exception as e:
         log(f"❌ Failed to start message thread: {e}")
-
     try:
         t2 = threading.Thread(target=alternating_title_loop, args=(cl1, cl2, groups, titles_map), daemon=True)
         t2.start()
         log("▶ Started alternating title-change thread")
     except Exception as e:
         log(f"❌ Failed to start title thread: {e}")
-
     try:
         t3 = threading.Thread(target=self_ping_loop, daemon=True)
         t3.start()
     except Exception as e:
         log(f"⚠ Failed to start self-ping thread: {e}")
 
-if __name__ == "__main__":
+# -------------------------------------------------
+# Always start the bot thread for Gunicorn or Flask
+def run_bot_once():
     try:
         threading.Thread(target=start_bot, daemon=True).start()
     except Exception as e:
-        log(f"❌ Failed to start bot: {e}")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Failed to start bot (import-time): {e}", flush=True)
+
+run_bot_once()
+# -------------------------------------------------
+
+if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     log(f"HTTP server starting on port {port}")
     try:
