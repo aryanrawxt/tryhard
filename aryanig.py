@@ -1,10 +1,8 @@
-# aryanig.py
 import time
 import threading
 import requests
 import json
 import os
-import urllib.parse
 from flask import Flask, jsonify
 from instagrapi import Client
 
@@ -26,9 +24,6 @@ _state_lock = threading.Lock()
 _thread_counts = {"burst": 0, "changer": 0}
 _last_login = {}  # sessionid (short) -> timestamp
 
-def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
-
 @app.route("/")
 def home():
     return "✅ Bot running — Local test active."
@@ -42,6 +37,9 @@ def health():
             "threads": _thread_counts,
             "last_login": _last_login
         })
+
+def log(msg):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 def send_message(cl, gid, msg):
     try:
@@ -74,11 +72,11 @@ def change_title(cl, headers, cookies, thread_id, title):
         resp = cl.private.post("https://www.instagram.com/api/graphql/", data=payload)
         result = resp.json()
         if "errors" in result:
-            log(f"[!] {getattr(cl,'username','?')}: Error changing title -> {result['errors']}")
+            log(f"[!] {cl.username}: Error changing title -> {result['errors']}")
         else:
-            log(f"[+] {getattr(cl,'username','?')}: Changed title to '{title}'")
+            log(f"[+] {cl.username}: Changed title to '{title}'")
     except Exception as e:
-        log(f"[-] {getattr(cl, 'username', 'unknown')}: Exception in change_title -> {e}")
+        log(f"[-] {cl.username}: Exception in change_title -> {e}")
 
 def safe_loop(fn, *args, restart_delay=5, **kwargs):
     while True:
@@ -100,7 +98,7 @@ def burst_cycle_round_robin(cl, group, index, total_accounts):
         account_delay = max(1, delay // max(1, total_accounts))
         initial_delay = account_delay * index
         if initial_delay > 0:
-            log(f"⏳ Messenger {getattr(cl,'username','?')} for {gid}, waiting {initial_delay}s before starting...")
+            log(f"⏳ Messenger {cl.username} for {gid}, waiting {initial_delay}s before starting...")
             time.sleep(initial_delay)
         msg_index = 0
         with _state_lock:
@@ -108,14 +106,14 @@ def burst_cycle_round_robin(cl, group, index, total_accounts):
         while True:
             msg = messages[msg_index % len(messages)]
             for burst_num in range(BURST_COUNT):
-                log(f"⏩ Round-robin burst {burst_num+1} from {getattr(cl,'username','?')} for {gid}")
+                log(f"⏩ Round-robin burst {burst_num+1} from {cl.username} for {gid}")
                 if not send_message(cl, gid, msg):
                     log(f"⚠ Error, cooling down {COOLDOWN_ON_ERROR}s")
                     time.sleep(COOLDOWN_ON_ERROR)
                 else:
                     time.sleep(account_delay)
             msg_index += 1
-            log(f"✅ Messenger account done cycle by {getattr(cl,'username','?')} for {gid}, waiting for global cycle ({REFRESH_DELAY * total_accounts}s)")
+            log(f"✅ Messenger account done cycle by {cl.username} for {gid}, waiting for global cycle ({REFRESH_DELAY * total_accounts}s)")
             time.sleep(REFRESH_DELAY * total_accounts)
     except Exception as exc:
         log(f"[burst_cycle_round_robin] Unhandled exception: {exc}")
@@ -129,14 +127,14 @@ def title_changer_staggered(cl, headers, cookies, thread_id, titles, index, tota
         account_delay = max(1, delay // max(1, total_accounts))
         initial_delay = account_delay * index
         if initial_delay > 0:
-            log(f"⏳ TitleChanger {getattr(cl,'username','?')}, waiting {initial_delay}s to stagger start...")
+            log(f"⏳ TitleChanger {cl.username}, waiting {initial_delay}s to stagger start...")
             time.sleep(initial_delay)
         title_idx = 0
         with _state_lock:
             _thread_counts["changer"] += 1
         while True:
             title_to_set = titles[title_idx % len(titles)]
-            log(f"📝 {getattr(cl,'username','?')} changing name for {thread_id} to '{title_to_set}'")
+            log(f"📝 {cl.username} changing name for {thread_id} to '{title_to_set}'")
             change_title(cl, headers, cookies, thread_id, title_to_set)
             title_idx += 1
             time.sleep(account_delay)
@@ -170,29 +168,13 @@ def login_with_backoff(session_id, max_retries=MAX_LOGIN_RETRIES):
             backoff = min(backoff * 2, 300)
 
 def start_bot_threads():
-    # Parse groups and decode session ids
     try:
         groups_data = json.loads(GROUPS_JSON) if GROUPS_JSON else []
-        log(f"[INFO] Loaded {len(groups_data)} groups from env.")
+        log(f"[INFO] Loaded {len(groups_data)} groups.")
     except Exception as e:
         log(f"❌ GROUPS_JSON load failed: {e}")
         groups_data = []
 
-    # Print a confidence debug message about sessions (last 6 chars)
-    try:
-        for g in groups_data:
-            if "accounts" in g and g["accounts"]:
-                for acc in g["accounts"]:
-                    sid = acc.get("session_id","")
-                    if sid:
-                        dec = urllib.parse.unquote(sid)
-                        log(f"[DEBUG] sample session tail: {dec[-6:]}")
-                        # replace with decoded value so rest of flows use clean sessionid
-                        acc["session_id"] = dec
-    except Exception as e:
-        log(f"[DEBUG] session decode error: {e}")
-
-    # Messaging threads
     for group in groups_data:
         if not group.get("accounts"):
             log(f"[WARN] No accounts configured for group {group.get('thread_id')}")
@@ -204,7 +186,6 @@ def start_bot_threads():
             if not sessionid:
                 log(f"[WARN] Missing session_id for account idx {idx} in group {group.get('thread_id')}")
                 continue
-
             def login_and_start_message(acc_session, group_ref, idx_ref, total_ref):
                 cl = login_with_backoff(acc_session)
                 if not cl:
@@ -215,10 +196,7 @@ def start_bot_threads():
                     target=lambda: safe_loop(burst_cycle_round_robin, cl, group_ref, idx_ref, total_ref, restart_delay=10),
                     daemon=True
                 ).start()
-
             threading.Thread(target=login_and_start_message, args=(sessionid, group, idx, total_accounts), daemon=True).start()
-
-    # Title changer threads
     for group in groups_data:
         if not group.get("accounts"):
             continue
@@ -228,7 +206,6 @@ def start_bot_threads():
             sessionid = acc.get("session_id")
             if not sessionid:
                 continue
-
             def login_and_start_changer(acc_session, group_ref, idx_ref, total_ref):
                 cl = login_with_backoff(acc_session)
                 if not cl:
@@ -242,10 +219,7 @@ def start_bot_threads():
                     target=lambda: safe_loop(title_changer_staggered, cl, headers, cookies, group_ref["thread_id"], titles, idx_ref, total_ref, restart_delay=10),
                     daemon=True
                 ).start()
-
             threading.Thread(target=login_and_start_changer, args=(sessionid, group, idx, total_accounts), daemon=True).start()
-
-    # Self-ping if configured
     if SELF_URL:
         def self_ping_loop():
             while True:
@@ -256,8 +230,6 @@ def start_bot_threads():
                     log(f"⚠ Self ping error: {e}")
                 time.sleep(60)
         threading.Thread(target=self_ping_loop, daemon=True).start()
-
-    # Print status periodically (keeps process busy)
     try:
         while True:
             with _state_lock:
@@ -266,23 +238,14 @@ def start_bot_threads():
     except KeyboardInterrupt:
         log("Exiting...")
 
-# --- Start threads on first request, in a daemon thread, to avoid import-time blocking ---
+# --- FIX for Render/Gunicorn: launch threads after HTTP server is ready ---
 threads_started = False
-def _start_runner_in_daemon():
-    t = threading.Thread(target=start_bot_threads, daemon=True)
-    t.start()
-    return t
 
 @app.before_first_request
 def activate_bot_threads():
     global threads_started
     if not threads_started:
-        log("[INFO] First HTTP request received — starting bot runner in daemon thread.")
-        _start_runner_in_daemon()
+        start_bot_threads()
         threads_started = True
 
-# If run locally for debugging:
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    log(f"[LOCAL] Starting Flask dev server on port {port}")
-    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
+# DO NOT call start_bot_threads() at import level! No 'if __name__' needed.
