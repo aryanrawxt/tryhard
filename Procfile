@@ -1,1 +1,2 @@
-web: gunicorn -w 1 -k gthread -b 0.0.0.0:$PORT aryanig:app --threads 4 --timeout 120 --log-level info
+web: gunicorn aryanig:app --bind 0.0.0.0:${PORT:-10000}
+
