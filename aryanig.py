@@ -1,4 +1,3 @@
-# aryanig_stable.py
 import time
 import threading
 import requests
@@ -12,10 +11,10 @@ GROUPS_JSON = os.getenv("GROUPS_JSON", "[]")
 CSRF_TOKEN = os.getenv("CSRF_TOKEN", "")
 DOC_ID = os.getenv("DOC_ID", "29088580780787855")
 BURST_COUNT = int(os.getenv("BURST_COUNT", "3"))
-REFRESH_DELAY = int(os.getenv("REFRESH_DELAY", "30"))  # global cycle, used for messaging
+REFRESH_DELAY = int(os.getenv("REFRESH_DELAY", "30"))
 COOLDOWN_ON_ERROR = int(os.getenv("COOLDOWN_ON_ERROR", "300"))
 SELF_URL = os.getenv("SELF_URL", "")
-LOGIN_STAGGER = int(os.getenv("LOGIN_STAGGER", "2"))   # seconds between starting logins to avoid bursts
+LOGIN_STAGGER = int(os.getenv("LOGIN_STAGGER", "2"))
 MAX_LOGIN_RETRIES = int(os.getenv("MAX_LOGIN_RETRIES", "5"))
 
 app = Flask(__name__)
@@ -31,7 +30,6 @@ def home():
 
 @app.route("/health")
 def health():
-    # return basic diagnostics
     with _state_lock:
         return jsonify({
             "status": "ok",
@@ -80,22 +78,16 @@ def change_title(cl, headers, cookies, thread_id, title):
     except Exception as e:
         log(f"[-] {cl.username}: Exception in change_title -> {e}")
 
-# -------------------------
-# Thread wrappers
-# -------------------------
 def safe_loop(fn, *args, restart_delay=5, **kwargs):
-    """Utility: keep calling fn(*args) in a loop; if it throws, wait and restart."""
     while True:
         try:
             fn(*args, **kwargs)
-            # if function returns (shouldn't), break
             log(f"[safe_loop] target {fn.__name__} returned; restarting after {restart_delay}s")
             time.sleep(restart_delay)
         except Exception as e:
             log(f"[safe_loop] Exception in {fn.__name__}: {e}. Restarting in {restart_delay}s")
             time.sleep(restart_delay)
 
-# Messaging loop (round-robin, per account)
 def burst_cycle_round_robin(cl, group, index, total_accounts):
     try:
         gid = group["thread_id"]
@@ -152,9 +144,6 @@ def title_changer_staggered(cl, headers, cookies, thread_id, titles, index, tota
         with _state_lock:
             _thread_counts["changer"] = max(0, _thread_counts["changer"] - 1)
 
-# -------------------------
-# Login helpers
-# -------------------------
 def login_with_backoff(session_id, max_retries=MAX_LOGIN_RETRIES):
     attempt = 0
     backoff = 2
@@ -163,7 +152,6 @@ def login_with_backoff(session_id, max_retries=MAX_LOGIN_RETRIES):
         try:
             cl = Client()
             cl.login_by_sessionid(session_id)
-            # success
             short = session_id[-6:] if session_id else "unknown"
             with _state_lock:
                 _last_login[short] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -177,11 +165,8 @@ def login_with_backoff(session_id, max_retries=MAX_LOGIN_RETRIES):
             sleep_time = backoff
             log(f"Retrying in {sleep_time}s...")
             time.sleep(sleep_time)
-            backoff = min(backoff * 2, 300)  # cap backoff
+            backoff = min(backoff * 2, 300)
 
-# -------------------------
-# Startup orchestration
-# -------------------------
 def start_bot_threads():
     try:
         groups_data = json.loads(GROUPS_JSON) if GROUPS_JSON else []
@@ -190,7 +175,6 @@ def start_bot_threads():
         log(f"❌ GROUPS_JSON load failed: {e}")
         groups_data = []
 
-    # Messaging (per account per group) - we stagger logins and start threads
     for group in groups_data:
         if not group.get("accounts"):
             log(f"[WARN] No accounts configured for group {group.get('thread_id')}")
@@ -202,24 +186,17 @@ def start_bot_threads():
             if not sessionid:
                 log(f"[WARN] Missing session_id for account idx {idx} in group {group.get('thread_id')}")
                 continue
-
-            # Do login + start burst thread in its own helper thread so main loop doesn't block
             def login_and_start_message(acc_session, group_ref, idx_ref, total_ref):
                 cl = login_with_backoff(acc_session)
                 if not cl:
                     log(f"[WARN] Skipping messaging thread for session ending {acc_session[-6:]} (login failed)")
                     return
-                # small delay to avoid simultaneous thread start
                 time.sleep(LOGIN_STAGGER * idx_ref)
-                # start messaging loop inside safe_loop wrapper to auto-restart on unhandled exceptions
                 threading.Thread(
                     target=lambda: safe_loop(burst_cycle_round_robin, cl, group_ref, idx_ref, total_ref, restart_delay=10),
                     daemon=True
                 ).start()
-
             threading.Thread(target=login_and_start_message, args=(sessionid, group, idx, total_accounts), daemon=True).start()
-
-    # Title-changers
     for group in groups_data:
         if not group.get("accounts"):
             continue
@@ -229,7 +206,6 @@ def start_bot_threads():
             sessionid = acc.get("session_id")
             if not sessionid:
                 continue
-
             def login_and_start_changer(acc_session, group_ref, idx_ref, total_ref):
                 cl = login_with_backoff(acc_session)
                 if not cl:
@@ -243,10 +219,7 @@ def start_bot_threads():
                     target=lambda: safe_loop(title_changer_staggered, cl, headers, cookies, group_ref["thread_id"], titles, idx_ref, total_ref, restart_delay=10),
                     daemon=True
                 ).start()
-
             threading.Thread(target=login_and_start_changer, args=(sessionid, group, idx, total_accounts), daemon=True).start()
-
-    # Self ping if configured
     if SELF_URL:
         def self_ping_loop():
             while True:
@@ -257,8 +230,6 @@ def start_bot_threads():
                     log(f"⚠ Self ping error: {e}")
                 time.sleep(60)
         threading.Thread(target=self_ping_loop, daemon=True).start()
-
-    # keep main alive by periodically printing status to logs
     try:
         while True:
             with _state_lock:
@@ -267,21 +238,6 @@ def start_bot_threads():
     except KeyboardInterrupt:
         log("Exiting...")
 
-def main():
-    log("=== SCRIPT STARTED ===")
-    port = int(os.getenv("PORT", "10000"))
-    log(f"[INFO] Starting Flask keep-alive on port {port}")
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True),
-        daemon=True
-    )
-    flask_thread.start()
-
-    # give flask a moment to bind so Render sees listening socket immediately
-    time.sleep(1)
-
-    # start bot threads after flask is up
-    start_bot_threads()
-
-if __name__ == "__main__":
-    main()
+# ---------- THIS MUST BE TOP-LEVEL, NOT INSIDE "__main__" ----------
+# Gunicorn only loads "app", so always launch the worker threads at top level!
+start_bot_threads()
