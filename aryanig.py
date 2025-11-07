@@ -3,7 +3,7 @@ import time
 import threading
 import urllib.parse
 import requests
-import json  # FIX: required for GROUP_TITLES parsing
+import json
 from flask import Flask, jsonify
 from instagrapi import Client
 
@@ -71,17 +71,15 @@ def safe_send_message(cl, gid, msg):
 def safe_change_title_direct(cl, gid, new_title):
     """Try the high-level instagrapi method first (if available)."""
     try:
-        # instagrapi has helper method `.direct_thread(...).update_title(...)` in many versions
+        # instagrapi has helper method `.direct_thread(...).update_title(...)`
         tt = cl.direct_thread(int(gid))
         try:
             tt.update_title(new_title)
             log(f"📝 {getattr(cl,'username','?')} changed title (direct) for {gid} -> {new_title}")
             return True
         except Exception:
-            # if direct update_title fails, fallthrough to graphql attempt below
             log(f"⚠ direct .update_title() failed for {gid} — will attempt GraphQL fallback")
     except Exception:
-        # some versions may not expose direct_thread or it may throw — continue to fallback
         pass
 
     # GraphQL fallback (uses private API)
@@ -93,7 +91,6 @@ def safe_change_title_direct(cl, gid, new_title):
             "Referer": f"https://www.instagram.com/direct/t/{gid}/",
         }
         cookies = {"csrftoken": CSRF_TOKEN}
-        # update client's private session headers/cookies temporarily
         try:
             cl.private.headers.update(headers)
             cl.private.cookies.update(cookies)
@@ -119,9 +116,6 @@ def safe_change_title_direct(cl, gid, new_title):
 
 # --------- Alternating message cycle with robust error handling ----------
 def alternating_messages_loop(cl1, cl2, groups):
-    """
-    Loop: Account1 sends to all groups -> wait DELAY -> Account2 sends to all groups -> wait DELAY -> repeat.
-    """
     if not groups:
         log("⚠ No groups for messaging loop.")
         return
@@ -136,12 +130,10 @@ def alternating_messages_loop(cl1, cl2, groups):
                         log(f"⚠ send failed by {getattr(cl1,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s")
                         time.sleep(COOLDOWN_ON_ERROR)
                     time.sleep(MSG_REFRESH_DELAY)
-                # small gap between groups
                 time.sleep(0.5)
         except Exception as e:
             log(f"❌ Exception in Account1 message loop: {e}")
 
-        # wait between accounts
         try:
             time.sleep(DELAY_BETWEEN_MSGS)
         except Exception:
@@ -160,7 +152,6 @@ def alternating_messages_loop(cl1, cl2, groups):
         except Exception as e:
             log(f"❌ Exception in Account2 message loop: {e}")
 
-        # wait between accounts
         try:
             time.sleep(DELAY_BETWEEN_MSGS)
         except Exception:
@@ -168,12 +159,6 @@ def alternating_messages_loop(cl1, cl2, groups):
 
 # --------- Alternating title-change loop with robust error handling ----------
 def alternating_title_loop(cl1, cl2, groups, titles_map):
-    """
-    Loop:
-      Account1 changes titles for groups (one or more titles per group in titles_map) -> wait TITLE_DELAY_BETWEEN_ACCOUNTS
-      Account2 changes titles similarly -> wait TITLE_DELAY_BETWEEN_ACCOUNTS
-      repeat
-    """
     if not groups:
         log("⚠ No groups for title loop.")
         return
@@ -222,6 +207,7 @@ def self_ping_loop():
 
 # --------- Orchestration / starter ----------
 def start_bot():
+    log(f"STARTUP: SESSION_ID_1={SESSION_ID_1}, SESSION_ID_2={SESSION_ID_2}, GROUP_IDS={GROUP_IDS}")
     # decode session ids automatically
     s1 = decode_session(SESSION_ID_1)
     s2 = decode_session(SESSION_ID_2)
@@ -235,7 +221,6 @@ def start_bot():
         log("❌ GROUP_IDS is empty or invalid")
         return
 
-    # optional titles map in env as JSON string
     titles_map = {}
     raw_titles = os.getenv("GROUP_TITLES", "")
     if raw_titles:
@@ -255,7 +240,6 @@ def start_bot():
         log("❌ Account 2 login failed — aborting start")
         return
 
-    # start threads
     try:
         t1 = threading.Thread(target=alternating_messages_loop, args=(cl1, cl2, groups), daemon=True)
         t1.start()
@@ -276,16 +260,13 @@ def start_bot():
     except Exception as e:
         log(f"⚠ Failed to start self-ping thread: {e}")
 
-# start only when run directly (keeps module import safe)
 if __name__ == "__main__":
-    # spawn bot in background then run Flask main loop
     try:
         threading.Thread(target=start_bot, daemon=True).start()
     except Exception as e:
         log(f"❌ Failed to start bot: {e}")
     port = int(os.getenv("PORT", "10000"))
     log(f"HTTP server starting on port {port}")
-    # run flask (simple single-process)
     try:
         app.run(host="0.0.0.0", port=port)
     except Exception as e:
