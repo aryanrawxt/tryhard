@@ -1,4 +1,11 @@
-Flask==3.1.0
-instagrapi==2.1.1
-requests==2.32.3
+Flask==3.0.3
 gunicorn==23.0.0
+requests==2.32.3
+instagrapi==1.18.7
+urllib3==2.2.3
+certifi==2024.8.30
+idna==3.10
+charset-normalizer==3.3.2
+Werkzeug==3.0.4
+itsdangerous==2.2.0
+click==8.1.7
