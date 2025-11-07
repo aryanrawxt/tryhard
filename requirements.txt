@@ -1,4 +1,4 @@
-Flask>=2.0
-gunicorn
-requests
-instagrapi
+Flask==3.1.0
+instagrapi==2.1.1
+requests==2.32.3
+gunicorn==23.0.0
