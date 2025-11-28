@@ -5,7 +5,7 @@ import urllib.parse
 import requests
 import json
 from flask import Flask, jsonify
-from instagrapi import Client  # normal use [web:38]
+from instagrapi import Client  # [web:38]
 
 # --------- CONFIG (via env) ----------
 SESSION_ID_1 = os.getenv("SESSION_ID_1")
@@ -27,7 +27,7 @@ CSRF_TOKEN = os.getenv("CSRF_TOKEN", "")
 app = Flask(__name__)
 
 # --------- PER-SESSION LOG STORAGE ----------
-MAX_SESSION_LOGS = 100
+MAX_SESSION_LOGS = 200
 session_logs = {
     "acc1": [],
     "acc2": [],
@@ -54,23 +54,35 @@ def log(msg, session="system"):
 def health():
     return jsonify({"status": "ok", "message": "Bot process alive"})
 
+def summarize(lines):
+    # work on newest -> oldest
+    rev = list(reversed(lines))
+    last_login = next((l for l in rev if "Logged in" in l), None)
+    last_send_ok = next((l for l in rev if "✅" in l and "sent to" in l), None)
+    last_send_err = next((l for l in rev if "Send failed" in l or "⚠ send failed" in l), None)
+    last_title_ok = next((l for l in rev if "changed title" in l and "📝" in l), None)
+    last_title_err = next((l for l in rev if "Title change" in l or "GraphQL title" in l), None)
+    return {
+        "last_login": last_login,
+        "last_send_ok": last_send_ok,
+        "last_send_error": last_send_err,
+        "last_title_ok": last_title_ok,
+        "last_title_error": last_title_err,
+    }
+
 @app.route("/status")
 def status():
     with logs_lock:
-        return jsonify({
-            "ok": True,
-            "sessions": {
-                "acc1": {
-                    "logs": session_logs["acc1"][-30:]
-                },
-                "acc2": {
-                    "logs": session_logs["acc2"][-30:]
-                },
-                "system": {
-                    "logs": session_logs["system"][-30:]
-                }
-            }
-        })
+        acc1_logs = session_logs["acc1"][-80:]
+        acc2_logs = session_logs["acc2"][-80:]
+        system_last = session_logs["system"][-5:]
+
+    return jsonify({
+        "ok": True,
+        "acc1": summarize(acc1_logs),
+        "acc2": summarize(acc2_logs),
+        "system_last": system_last
+    })
 
 # --------- Utility helpers ----------
 def decode_session(session):
@@ -123,7 +135,6 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
             )
     except Exception:
         pass
-
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -169,7 +180,6 @@ def alternating_messages_loop(cl1, cl2, groups):
     if not groups:
         log("⚠ No groups for messaging loop.", session="system")
         return
-
     while True:
         try:
             for gid in groups:
@@ -185,12 +195,10 @@ def alternating_messages_loop(cl1, cl2, groups):
                 time.sleep(0.5)
         except Exception as e:
             log(f"❌ Exception in Account1 message loop: {e}", session="acc1")
-
         try:
             time.sleep(DELAY_BETWEEN_MSGS)
         except Exception:
             pass
-
         try:
             for gid in groups:
                 for _ in range(BURST_COUNT):
@@ -205,7 +213,6 @@ def alternating_messages_loop(cl1, cl2, groups):
                 time.sleep(0.5)
         except Exception as e:
             log(f"❌ Exception in Account2 message loop: {e}", session="acc2")
-
         try:
             time.sleep(DELAY_BETWEEN_MSGS)
         except Exception:
@@ -215,7 +222,6 @@ def alternating_title_loop(cl1, cl2, groups, titles_map):
     if not groups:
         log("⚠ No groups for title loop.", session="system")
         return
-
     while True:
         try:
             for gid in groups:
@@ -233,7 +239,6 @@ def alternating_title_loop(cl1, cl2, groups, titles_map):
                         pass
         except Exception as e:
             log(f"❌ Exception in Account1 title loop: {e}", session="acc1")
-
         try:
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
@@ -268,18 +273,15 @@ def start_bot():
         f"GROUP_IDS={repr(GROUP_IDS)}, MESSAGE_TEXT={repr(MESSAGE_TEXT)}",
         session="system"
     )
-
     s1 = decode_session(SESSION_ID_1)
     s2 = decode_session(SESSION_ID_2)
     if not s1 or not s2:
         log("❌ SESSION_ID_1 and SESSION_ID_2 are required in environment", session="system")
         return
-
     groups = [g.strip() for g in GROUP_IDS.split(",") if g.strip()]
     if not groups:
         log("❌ GROUP_IDS is empty or invalid", session="system")
         return
-
     titles_map = {}
     raw_titles = os.getenv("GROUP_TITLES", "")
     if raw_titles:
@@ -287,33 +289,28 @@ def start_bot():
             titles_map = json.loads(raw_titles)
         except Exception as e:
             log(f"⚠ GROUP_TITLES JSON parse error: {e}. Using fallback titles.", session="system")
-
     log("🔐 Logging in account 1...", session="system")
     cl1 = login_session(s1, "acc1")
     if not cl1:
         log("❌ Account 1 login failed — aborting start", session="system")
         return
-
     log("🔐 Logging in account 2...", session="system")
     cl2 = login_session(s2, "acc2")
     if not cl2:
         log("❌ Account 2 login failed — aborting start", session="system")
         return
-
     try:
         t1 = threading.Thread(target=alternating_messages_loop, args=(cl1, cl2, groups), daemon=True)
         t1.start()
         log("▶ Started alternating message thread", session="system")
     except Exception as e:
         log(f"❌ Failed to start message thread: {e}", session="system")
-
     try:
         t2 = threading.Thread(target=alternating_title_loop, args=(cl1, cl2, groups, titles_map), daemon=True)
         t2.start()
         log("▶ Started alternating title-change thread", session="system")
     except Exception as e:
         log(f"❌ Failed to start title thread: {e}", session="system")
-
     try:
         t3 = threading.Thread(target=self_ping_loop, daemon=True)
         t3.start()
@@ -321,7 +318,6 @@ def start_bot():
         log(f"⚠ Failed to start self-ping thread: {e}", session="system")
 
 # -------------------------------------------------
-# Always start the bot thread for Gunicorn or Flask
 def run_bot_once():
     try:
         threading.Thread(target=start_bot, daemon=True).start()
