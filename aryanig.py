@@ -4,43 +4,21 @@ import threading
 import urllib.parse
 import requests
 import json
-from datetime import datetime
 from flask import Flask, jsonify
 from instagrapi import Client
-from instagrapi.exceptions import LoginRequired
-
-# --------- SHARED STATUS (thread-safe) ----------
-status_data = {
-    'accounts': {
-        'acc1': {'status': 'init', 'last_check': None, 'username': None},
-        'acc2': {'status': 'init', 'last_check': None, 'username': None}
-    },
-    'errors': {
-        'message_errors': 0,
-        'title_errors': 0,
-        'last_message_error': None,
-        'last_title_error': None
-    },
-    'threads': {'messages': 'running', 'titles': 'running', 'ping': 'running'},
-    'last_update': None
-}
-status_lock = threading.Lock()
-
-log_buffer = []  # In-memory recent logs (last 100)
-MAX_LOGS = 100
+from instagrapi.exceptions import LoginRequired  # [web:26]
 
 # --------- CONFIG (via env) ----------
 SESSION_ID_1 = os.getenv("SESSION_ID_1")
 SESSION_ID_2 = os.getenv("SESSION_ID_2")
-GROUP_IDS = os.getenv("GROUP_IDS", "")            
+GROUP_IDS = os.getenv("GROUP_IDS", "")
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
 
-# timings (seconds)
-DELAY_BETWEEN_MSGS = int(os.getenv("DELAY_BETWEEN_MSGS", "20"))      
-TITLE_DELAY_BETWEEN_ACCOUNTS = int(os.getenv("TITLE_DELAY_BETWEEN_ACCOUNTS", "120"))  
-MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))        
-BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))                    
+DELAY_BETWEEN_MSGS = int(os.getenv("DELAY_BETWEEN_MSGS", "20"))
+TITLE_DELAY_BETWEEN_ACCOUNTS = int(os.getenv("TITLE_DELAY_BETWEEN_ACCOUNTS", "120"))
+MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
+BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "60"))
 COOLDOWN_ON_ERROR = int(os.getenv("COOLDOWN_ON_ERROR", "300"))
 DOC_ID = os.getenv("DOC_ID", "29088580780787855")
@@ -48,51 +26,64 @@ CSRF_TOKEN = os.getenv("CSRF_TOKEN", "")
 
 app = Flask(__name__)
 
-# --------- Logging helper (thread-safe) ----------
-def log(msg):
-    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    full_msg = f"[{timestamp}] {msg}"
-    print(full_msg, flush=True)
-    
-    with threading.Lock():
-        log_buffer.append(full_msg)
-        if len(log_buffer) > MAX_LOGS:
-            log_buffer.pop(0)
+# --------- PER-SESSION LOG STORAGE ----------
+MAX_SESSION_LOGS = 100
+session_logs = {
+    "acc1": [],
+    "acc2": [],
+    "system": []
+}
+logs_lock = threading.Lock()
 
-# --------- STATUS ENDPOINTS ----------
-@app.route("/status")
-def status():
-    with status_lock:
-        data = status_data.copy()
-    return jsonify(data)
+session_info = {
+    "acc1": {"username": None},
+    "acc2": {"username": None}
+}
 
-@app.route("/logs")
-def logs():
-    with threading.Lock():
-        return jsonify({
-            "logs": log_buffer[-50:],  # Last 50 logs
-            "total_logs": len(log_buffer),
-            "count": len(log_buffer[-50:])
-        })
+# --------- Logging helper ----------
+def log(msg, session="system"):
+    """Print to stdout + store in per-session buffer."""
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    full = f"[{ts}] {msg}"
+    print(full, flush=True)  # Render shows this
 
+    if session not in session_logs:
+        session = "system"
+
+    with logs_lock:
+        session_logs[session].append(msg)  # store only clean text
+        if len(session_logs[session]) > MAX_SESSION_LOGS:
+            session_logs[session].pop(0)
+
+# --------- Routes ----------
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "message": "Bot process alive"})
 
-# --------- Session check helper ----------
-def check_session_valid(cl, acc_name):
-    """Check if session is still valid using lightweight method"""
-    try:
-        cl.get_timeline_feed()  # Standard session validity check [web:26]
-        return True
-    except LoginRequired:
-        log(f"❌ {acc_name} SESSION EXPIRED - LoginRequired")
-        return False
-    except Exception as e:
-        log(f"⚠ {acc_name} session check failed: {e}")
-        return False
+@app.route("/status")
+def status():
+    """Return human-like status grouped by session."""
+    with logs_lock:
+        acc1_name = session_info["acc1"]["username"] or "acc1"
+        acc2_name = session_info["acc2"]["username"] or "acc2"
+        return jsonify({
+            "ok": True,
+            "sessions": {
+                "acc1": {
+                    "username": acc1_name,
+                    "logs": session_logs["acc1"][-30:]
+                },
+                "acc2": {
+                    "username": acc2_name,
+                    "logs": session_logs["acc2"][-30:]
+                },
+                "system": {
+                    "logs": session_logs["system"][-30:]
+                }
+            }
+        })
 
-# --------- Utility helpers ----------
+# --------- Helpers ----------
 def decode_session(session):
     if not session:
         return session
@@ -101,60 +92,62 @@ def decode_session(session):
     except Exception:
         return session
 
-# --------- Instagram helpers with status updates ----------
+def set_username(acc_name, username):
+    with logs_lock:
+        session_info[acc_name]["username"] = username
+
+# --------- Instagram / session helpers ----------
 def login_session(session_id, name_hint=""):
-    """Log in using sessionid; returns Client or None"""
     session_id = decode_session(session_id)
     try:
         cl = Client()
-        cl.login_by_sessionid(session_id)
+        cl.login_by_sessionid(session_id)  # [web:38]
         uname = getattr(cl, "username", None) or name_hint or "unknown"
-        log(f"✅ Logged in {uname}")
-        
-        # Update status
-        with status_lock:
-            status_data['accounts'][name_hint]['status'] = 'active'
-            status_data['accounts'][name_hint]['username'] = uname
-            status_data['accounts'][name_hint]['last_check'] = time.time()
-            status_data['last_update'] = time.time()
-        
+        set_username(name_hint, uname)
+        log(f"✅ Logged in {uname}", session=name_hint)
         return cl
     except Exception as e:
-        log(f"❌ Login failed ({name_hint}): {e}")
-        with status_lock:
-            status_data['accounts'][name_hint]['status'] = 'login_failed'
+        log(f"❌ Login failed ({name_hint}): {e}", session=name_hint)
         return None
 
-def safe_send_message(cl, gid, msg):
-    """Send message and handle exceptions"""
+def check_session_valid(cl, acc_name):
     try:
-        cl.direct_send(msg, thread_ids=[int(gid)])
-        log(f"✅ {getattr(cl,'username','?')} sent to {gid}")
+        cl.get_timeline_feed()  # light validity check [web:26]
         return True
+    except LoginRequired:
+        log(f"❌ {acc_name} session expired (LoginRequired)", session=acc_name)
+        return False
     except Exception as e:
-        error_msg = f"⚠ Send failed ({getattr(cl,'username','?')}) -> {gid}: {e}"
-        log(error_msg)
-        
-        # Update error counters
-        with status_lock:
-            status_data['errors']['message_errors'] += 1
-            status_data['errors']['last_message_error'] = str(e)
-            status_data['last_update'] = time.time()
+        log(f"⚠ {acc_name} session check failed: {e}", session=acc_name)
         return False
 
-def safe_change_title_direct(cl, gid, new_title):
-    """Try title change with error tracking"""
+def safe_send_message(cl, gid, msg, acc_name):
+    try:
+        cl.direct_send(msg, thread_ids=[int(gid)])
+        log(f"✅ {getattr(cl,'username','?')} sent to {gid}", session=acc_name)
+        return True
+    except Exception as e:
+        log(f"⚠ Send failed ({getattr(cl,'username','?')}) -> {gid}: {e}", session=acc_name)
+        return False
+
+def safe_change_title_direct(cl, gid, new_title, acc_name):
     try:
         tt = cl.direct_thread(int(gid))
         try:
             tt.update_title(new_title)
-            log(f"📝 {getattr(cl,'username','?')} changed title (direct) for {gid} -> {new_title}")
+            log(
+                f"📝 {getattr(cl,'username','?')} changed title (direct) for {gid} -> {new_title}",
+                session=acc_name
+            )
             return True
         except Exception:
-            log(f"⚠ direct .update_title() failed for {gid} — will attempt GraphQL fallback")
+            log(
+                f"⚠ direct .update_title() failed for {gid} — trying GraphQL",
+                session=acc_name
+            )
     except Exception:
         pass
-    
+
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -170,61 +163,49 @@ def safe_change_title_direct(cl, gid, new_title):
         resp = cl.private.post("https://www.instagram.com/api/graphql/", data=payload, timeout=10)
         result = resp.json()
         if "errors" in result:
-            error_msg = f"❌ GraphQL title errors for {gid}: {result['errors']}"
-            log(error_msg)
-            with status_lock:
-                status_data['errors']['title_errors'] += 1
-                status_data['errors']['last_title_error'] = str(result['errors'])
-                status_data['last_update'] = time.time()
+            log(
+                f"❌ GraphQL title errors for {gid}: {result['errors']}",
+                session=acc_name
+            )
             return False
-        log(f"📝 {getattr(cl,'username','?')} changed title (graphql) for {gid} -> {new_title}")
+        log(
+            f"📝 {getattr(cl,'username','?')} changed title (graphql) for {gid} -> {new_title}",
+            session=acc_name
+        )
         return True
     except Exception as e:
-        error_msg = f"⚠ Title change failed for {gid}: {e}"
-        log(error_msg)
-        with status_lock:
-            status_data['errors']['title_errors'] += 1
-            status_data['errors']['last_title_error'] = str(e)
-            status_data['last_update'] = time.time()
+        log(f"⚠ Title change failed for {gid}: {e}", session=acc_name)
         return False
 
-# --------- Main loops (unchanged structure, added status checks) ----------
+# --------- Loops ----------
 def alternating_messages_loop(cl1, cl2, groups):
     while True:
         try:
-            # Periodic session check every 10 cycles
-            if time.time() % 600 < 10:  # ~10min check
-                if not check_session_valid(cl1, 'acc1'):
-                    with status_lock:
-                        status_data['accounts']['acc1']['status'] = 'expired'
-                if not check_session_valid(cl2, 'acc2'):
-                    with status_lock:
-                        status_data['accounts']['acc2']['status'] = 'expired'
-            
+            check_session_valid(cl1, "acc1")
             for gid in groups:
                 for _ in range(BURST_COUNT):
-                    ok = safe_send_message(cl1, gid, MESSAGE_TEXT)
+                    ok = safe_send_message(cl1, gid, MESSAGE_TEXT, "acc1")
                     if not ok:
-                        log(f"⚠ send failed by {getattr(cl1,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s")
                         time.sleep(COOLDOWN_ON_ERROR)
                     time.sleep(MSG_REFRESH_DELAY)
                 time.sleep(0.5)
         except Exception as e:
-            log(f"❌ Exception in Account1 message loop: {e}")
-        
+            log(f"❌ Exception in Account1 message loop: {e}", session="acc1")
+
         time.sleep(DELAY_BETWEEN_MSGS)
-        
+
         try:
+            check_session_valid(cl2, "acc2")
             for gid in groups:
                 for _ in range(BURST_COUNT):
-                    ok = safe_send_message(cl2, gid, MESSAGE_TEXT)
+                    ok = safe_send_message(cl2, gid, MESSAGE_TEXT, "acc2")
                     if not ok:
-                        log(f"⚠ send failed by {getattr(cl2,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s")
                         time.sleep(COOLDOWN_ON_ERROR)
                     time.sleep(MSG_REFRESH_DELAY)
                 time.sleep(0.5)
         except Exception as e:
-            log(f"❌ Exception in Account2 message loop: {e}")
+            log(f"❌ Exception in Account2 message loop: {e}", session="acc2")
+
         time.sleep(DELAY_BETWEEN_MSGS)
 
 def alternating_title_loop(cl1, cl2, groups, titles_map):
@@ -233,107 +214,94 @@ def alternating_title_loop(cl1, cl2, groups, titles_map):
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
                 for t in titles:
-                    ok = safe_change_title_direct(cl1, gid, t)
-                    if not ok:
-                        log(f"⚠ Title change failed for {gid} by {getattr(cl1,'username','?')}")
+                    safe_change_title_direct(cl1, gid, t, "acc1")
                     time.sleep(TITLE_DELAY_BETWEEN_ACCOUNTS)
         except Exception as e:
-            log(f"❌ Exception in Account1 title loop: {e}")
-        
+            log(f"❌ Exception in Account1 title loop: {e}", session="acc1")
+
         try:
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
                 for t in titles:
-                    ok = safe_change_title_direct(cl2, gid, t)
-                    if not ok:
-                        log(f"⚠ Title change failed for {gid} by {getattr(cl2,'username','?')}")
+                    safe_change_title_direct(cl2, gid, t, "acc2")
                     time.sleep(TITLE_DELAY_BETWEEN_ACCOUNTS)
         except Exception as e:
-            log(f"❌ Exception in Account2 title loop: {e}")
+            log(f"❌ Exception in Account2 title loop: {e}", session="acc2")
 
 def self_ping_loop():
     while True:
         if SELF_URL:
             try:
                 requests.get(SELF_URL, timeout=10)
-                log("🔁 Self ping successful")
+                log("🔁 Self ping successful", session="system")
             except Exception as e:
-                log(f"⚠ Self ping failed: {e}")
+                log(f"⚠ Self ping failed: {e}", session="system")
         time.sleep(SELF_PING_INTERVAL)
 
-# --------- Start bot (added initial status) ----------
+# --------- Start bot ----------
 def start_bot():
-    log(f"STARTUP: SESSION_ID_1={repr(SESSION_ID_1)}, SESSION_ID_2={repr(SESSION_ID_2)}, GROUP_IDS={repr(GROUP_IDS)}")
-    
-    with status_lock:
-        status_data['last_update'] = time.time()
-    
+    log(
+        f"STARTUP: SESSION_ID_1 set={bool(SESSION_ID_1)}, "
+        f"SESSION_ID_2 set={bool(SESSION_ID_2)}, GROUP_IDS={repr(GROUP_IDS)}",
+        session="system"
+    )
+
     s1 = decode_session(SESSION_ID_1)
     s2 = decode_session(SESSION_ID_2)
     if not s1 or not s2:
-        log("❌ SESSION_ID_1 and SESSION_ID_2 are required")
-        with status_lock:
-            status_data['accounts']['acc1']['status'] = 'missing_session'
-            status_data['accounts']['acc2']['status'] = 'missing_session'
+        log("❌ SESSION_ID_1 and SESSION_ID_2 are required", session="system")
         return
-    
+
     groups = [g.strip() for g in GROUP_IDS.split(",") if g.strip()]
     if not groups:
-        log("❌ GROUP_IDS is empty")
+        log("❌ GROUP_IDS is empty or invalid", session="system")
         return
-    
+
     titles_map = {}
     raw_titles = os.getenv("GROUP_TITLES", "")
     if raw_titles:
         try:
             titles_map = json.loads(raw_titles)
-        except Exception:
-            log("⚠ GROUP_TITLES JSON invalid, using fallback")
-    
-    # Login accounts
+        except Exception as e:
+            log(f"⚠ GROUP_TITLES JSON parse error: {e}. Using fallback titles.", session="system")
+
+    log("🔐 Logging in account 1...", session="system")
     cl1 = login_session(s1, "acc1")
     if not cl1:
         return
+
+    log("🔐 Logging in account 2...", session="system")
     cl2 = login_session(s2, "acc2")
     if not cl2:
         return
-    
-    # Start threads
+
     try:
-        t1 = threading.Thread(target=alternating_messages_loop, args=(cl1, cl2, groups), daemon=True)
-        t1.start()
-        with status_lock:
-            status_data['threads']['messages'] = 'running'
-        log("▶ Started message thread")
+        threading.Thread(target=alternating_messages_loop, args=(cl1, cl2, groups), daemon=True).start()
+        log("▶ Started alternating message thread", session="system")
     except Exception as e:
-        log(f"❌ Message thread failed: {e}")
-    
+        log(f"❌ Failed to start message thread: {e}", session="system")
+
     try:
-        t2 = threading.Thread(target=alternating_title_loop, args=(cl1, cl2, groups, titles_map), daemon=True)
-        t2.start()
-        with status_lock:
-            status_data['threads']['titles'] = 'running'
-        log("▶ Started title thread")
+        threading.Thread(target=alternating_title_loop, args=(cl1, cl2, groups, titles_map), daemon=True).start()
+        log("▶ Started alternating title-change thread", session="system")
     except Exception as e:
-        log(f"❌ Title thread failed: {e}")
-    
+        log(f"❌ Failed to start title thread: {e}", session="system")
+
     try:
-        t3 = threading.Thread(target=self_ping_loop, daemon=True)
-        t3.start()
-        with status_lock:
-            status_data['threads']['ping'] = 'running'
+        threading.Thread(target=self_ping_loop, daemon=True).start()
+        log("▶ Started self-ping thread", session="system")
     except Exception as e:
-        log(f"⚠ Ping thread failed: {e}")
+        log(f"⚠ Failed to start self-ping thread: {e}", session="system")
 
 def run_bot_once():
     try:
         threading.Thread(target=start_bot, daemon=True).start()
     except Exception as e:
-        log(f"❌ Bot startup failed: {e}")
+        log(f"❌ Failed to start bot (import-time): {e}", session="system")
 
 run_bot_once()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
-    log(f"🚀 Server starting on port {port} - /status /logs available")
+    log(f"HTTP server starting on port {port}", session="system")
     app.run(host="0.0.0.0", port=port)
