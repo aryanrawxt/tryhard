@@ -5,10 +5,9 @@ import urllib.parse
 import requests
 import json
 from flask import Flask, jsonify
-from instagrapi import Client
-from instagrapi.exceptions import LoginRequired  # session check [web:26]
+from instagrapi import Client  # normal instagrapi usage [web:38]
 
-# --------- CONFIG ----------
+# --------- CONFIG (via env) ----------
 SESSION_ID_1 = os.getenv("SESSION_ID_1")
 SESSION_ID_2 = os.getenv("SESSION_ID_2")
 GROUP_IDS = os.getenv("GROUP_IDS", "")
@@ -92,12 +91,12 @@ def decode_session(session):
     except Exception:
         return session
 
-# --------- Instagram / session helpers ----------
+# --------- Instagram helpers (no session check) ----------
 def login_session(session_id, acc_name):
     session_id = decode_session(session_id)
     try:
         cl = Client()
-        cl.login_by_sessionid(session_id)  # [web:38]
+        cl.login_by_sessionid(session_id)  # login with sessionid [web:38]
         uname = getattr(cl, "username", None) or acc_name or "unknown"
         set_username(acc_name, uname)
         log(f"✅ Logged in {uname}", session=acc_name)
@@ -105,17 +104,6 @@ def login_session(session_id, acc_name):
     except Exception as e:
         log(f"❌ Login failed ({acc_name}): {e}", session=acc_name)
         return None
-
-def check_session_valid(cl, acc_name):
-    try:
-        cl.get_timeline_feed()  # light validity check [web:26]
-        return True
-    except LoginRequired:
-        log(f"❌ {acc_name} session expired (LoginRequired)", session=acc_name)
-        return False
-    except Exception as e:
-        log(f"⚠ {acc_name} session check failed: {e}", session=acc_name)
-        return False
 
 def safe_send_message(cl, gid, msg, acc_name):
     try:
@@ -173,11 +161,10 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
         log(f"⚠ Title change failed for {gid}: {e}", session=acc_name)
         return False
 
-# --------- Loops ----------
+# --------- Loops (no check_session_valid) ----------
 def alternating_messages_loop(cl1, cl2, groups):
     while True:
         try:
-            check_session_valid(cl1, "acc1")
             for gid in groups:
                 for _ in range(BURST_COUNT):
                     ok = safe_send_message(cl1, gid, MESSAGE_TEXT, "acc1")
@@ -191,7 +178,6 @@ def alternating_messages_loop(cl1, cl2, groups):
         time.sleep(DELAY_BETWEEN_MSGS)
 
         try:
-            check_session_valid(cl2, "acc2")
             for gid in groups:
                 for _ in range(BURST_COUNT):
                     ok = safe_send_message(cl2, gid, MESSAGE_TEXT, "acc2")
