@@ -6,9 +6,9 @@ import requests
 import json
 from flask import Flask, jsonify
 from instagrapi import Client
-from instagrapi.exceptions import LoginRequired  # [web:26]
+from instagrapi.exceptions import LoginRequired  # session check [web:26]
 
-# --------- CONFIG (via env) ----------
+# --------- CONFIG ----------
 SESSION_ID_1 = os.getenv("SESSION_ID_1")
 SESSION_ID_2 = os.getenv("SESSION_ID_2")
 GROUP_IDS = os.getenv("GROUP_IDS", "")
@@ -42,18 +42,21 @@ session_info = {
 
 # --------- Logging helper ----------
 def log(msg, session="system"):
-    """Print to stdout + store in per-session buffer."""
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
     full = f"[{ts}] {msg}"
-    print(full, flush=True)  # Render shows this
+    print(full, flush=True)
 
     if session not in session_logs:
         session = "system"
 
     with logs_lock:
-        session_logs[session].append(msg)  # store only clean text
+        session_logs[session].append(msg)
         if len(session_logs[session]) > MAX_SESSION_LOGS:
             session_logs[session].pop(0)
+
+def set_username(acc_name, username):
+    with logs_lock:
+        session_info[acc_name]["username"] = username
 
 # --------- Routes ----------
 @app.route("/health")
@@ -62,19 +65,16 @@ def health():
 
 @app.route("/status")
 def status():
-    """Return human-like status grouped by session."""
     with logs_lock:
-        acc1_name = session_info["acc1"]["username"] or "acc1"
-        acc2_name = session_info["acc2"]["username"] or "acc2"
         return jsonify({
             "ok": True,
             "sessions": {
                 "acc1": {
-                    "username": acc1_name,
+                    "username": session_info["acc1"]["username"] or "acc1",
                     "logs": session_logs["acc1"][-30:]
                 },
                 "acc2": {
-                    "username": acc2_name,
+                    "username": session_info["acc2"]["username"] or "acc2",
                     "logs": session_logs["acc2"][-30:]
                 },
                 "system": {
@@ -92,22 +92,18 @@ def decode_session(session):
     except Exception:
         return session
 
-def set_username(acc_name, username):
-    with logs_lock:
-        session_info[acc_name]["username"] = username
-
 # --------- Instagram / session helpers ----------
-def login_session(session_id, name_hint=""):
+def login_session(session_id, acc_name):
     session_id = decode_session(session_id)
     try:
         cl = Client()
         cl.login_by_sessionid(session_id)  # [web:38]
-        uname = getattr(cl, "username", None) or name_hint or "unknown"
-        set_username(name_hint, uname)
-        log(f"✅ Logged in {uname}", session=name_hint)
+        uname = getattr(cl, "username", None) or acc_name or "unknown"
+        set_username(acc_name, uname)
+        log(f"✅ Logged in {uname}", session=acc_name)
         return cl
     except Exception as e:
-        log(f"❌ Login failed ({name_hint}): {e}", session=name_hint)
+        log(f"❌ Login failed ({acc_name}): {e}", session=acc_name)
         return None
 
 def check_session_valid(cl, acc_name):
