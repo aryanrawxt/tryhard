@@ -5,7 +5,7 @@ import urllib.parse
 import requests
 import json
 from flask import Flask, jsonify
-from instagrapi import Client  # [web:38]
+from instagrapi import Client  # [web:16]
 
 # --------- CONFIG (via env) ----------
 SESSION_ID_1 = os.getenv("SESSION_ID_1")
@@ -17,16 +17,24 @@ GROUP_IDS = os.getenv("GROUP_IDS", "")  # comma separated thread ids
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
 
-# timings (seconds)
-# spam:
-#   1st acc at 1 sec, then every account switch waits 10 sec
-SPAM_START_OFFSET = 1          # first ever spam fire at t=1s
-SPAM_GAP_BETWEEN_ACCOUNTS = 10  # gap between accounts
+# --------- TIMING CONFIG ----------
+# Spam:
+#   t≈1s:   acc1 spam
+#   t≈11s:  acc2 spam
+#   t≈21s:  acc3 spam
+#   t≈31s:  acc4 spam
+#   t≈41s:  acc1 spam again...
+SPAM_START_OFFSET = 1              # first spam action ~1s after start
+SPAM_GAP_BETWEEN_ACCOUNTS = 10     # 10s gap between accounts
 
-# nc:
-#   1st acc at 1 sec (nc), then 60 sec later acc2, then 120 sec later acc3, then 180 sec later acc4
-NC_START_OFFSET = 1             # first ever nc fire at t=1s
-NC_ACC_GAP = 60                 # 60s between each account's nc
+# NC (title change):
+#   t≈1s:   acc1 nc
+#   t≈61s:  acc2 nc
+#   t≈121s: acc3 nc
+#   t≈181s: acc4 nc
+#   t≈241s: acc1 nc again...
+NC_START_OFFSET = 1                # first nc action ~1s after start
+NC_ACC_GAP = 60                    # 60s gap between accounts
 
 MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
 BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
@@ -115,7 +123,7 @@ def login_session(session_id, name_hint=""):
     session_id = decode_session(session_id)
     try:
         cl = Client()
-        cl.login_by_sessionid(session_id)  # [web:38]
+        cl.login_by_sessionid(session_id)  # [web:16]
         uname = getattr(cl, "username", None) or name_hint or "unknown"
         log(f"✅ Logged in {uname}", session=name_hint or "system")
         return cl
@@ -126,7 +134,7 @@ def login_session(session_id, name_hint=""):
 def safe_send_message(cl, gid, msg, acc_name):
     """Send message and handle exceptions"""
     try:
-        cl.direct_send(msg, thread_ids=[int(gid)])
+        cl.direct_send(msg, thread_ids=[int(gid)])  # [web:16]
         log(f"✅ {getattr(cl,'username','?')} sent to {gid}", session=acc_name)
         return True
     except Exception as e:
@@ -134,9 +142,9 @@ def safe_send_message(cl, gid, msg, acc_name):
         return False
 
 def safe_change_title_direct(cl, gid, new_title, acc_name):
-    """Try the high-level instagrapi method first, then GraphQL fallback."""
+    """Try high-level update_title, then GraphQL fallback."""
     try:
-        tt = cl.direct_thread(int(gid))
+        tt = cl.direct_thread(int(gid))  # [web:16]
         try:
             tt.update_title(new_title)
             log(
@@ -151,6 +159,7 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
             )
     except Exception:
         pass
+
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -194,15 +203,17 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
 # --------- Loops ----------
 def spam_loop(clients, groups):
     """
-    spam:
-      1st acc at 1 sec then wait 10 sec -> 2nd acc then wait 10 sec -> 3rd acc then wait 10 sec ->
-      4th acc then wait 10 sec -> then back to 1st, etc.
+    Spam rotation (per group list):
+      t≈1s:   acc1
+      t≈11s:  acc2
+      t≈21s:  acc3
+      t≈31s:  acc4
+      t≈41s:  acc1 again...
     """
     if not groups:
         log("⚠ No groups for messaging loop.", session="system")
         return
 
-    # initial offset so first send ~at 1s
     time.sleep(SPAM_START_OFFSET)
 
     idx = 0
@@ -222,31 +233,31 @@ def spam_loop(clients, groups):
                         )
                         time.sleep(COOLDOWN_ON_ERROR)
                     time.sleep(MSG_REFRESH_DELAY)
-                # small gap between groups if you want; can be removed
                 time.sleep(0.5)
         except Exception as e:
             log(f"❌ Exception in {acc_name} message loop: {e}", session=acc_name)
 
-        # after this account finishes all groups, wait 10s then next account
         try:
             time.sleep(SPAM_GAP_BETWEEN_ACCOUNTS)
         except Exception:
             pass
 
-        idx = (idx + 1) % n  # rotate 0→1→2→3→0...
+        idx = (idx + 1) % n
 
 def nc_loop(clients, groups, titles_map):
     """
-    nc:
-      1st acc at 1 sec then wait 60 sec -> 2nd acc at 61 sec -> wait 60 sec ->
-      3rd acc at 121 sec -> wait 60 sec -> 4th acc at 181 sec -> wait 60 sec ->
-      then back to 1st after 240s window, etc.
+    NC rotation (per group list):
+      t≈1s:   acc1
+      t≈61s:  acc2
+      t≈121s: acc3
+      t≈181s: acc4
+      t≈241s: acc1 again...
+    Only one account acts at a time; others wait.
     """
     if not groups:
         log("⚠ No groups for title loop.", session="system")
         return
 
-    # first nc action around 1 second
     time.sleep(NC_START_OFFSET)
 
     idx = 0
@@ -259,25 +270,24 @@ def nc_loop(clients, groups, titles_map):
         try:
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
-                for t in titles:
-                    ok = safe_change_title_direct(cl, gid, t, acc_name)
-                    if not ok:
-                        log(
-                            f"⚠ Title change failed for {gid} by {getattr(cl,'username','?')}",
-                            session=acc_name
-                        )
-                    # you can keep a small delay between titles in same group if needed
-                    time.sleep(1)
+                # one title per turn to match your timing style
+                t = titles[0]
+                ok = safe_change_title_direct(cl, gid, t, acc_name)
+                if not ok:
+                    log(
+                        f"⚠ Title change failed for {gid} by {getattr(cl,'username','?')}",
+                        session=acc_name
+                    )
+                time.sleep(1)
         except Exception as e:
             log(f"❌ Exception in {acc_name} title loop: {e}", session=acc_name)
 
-        # after this account finishes all groups, wait 60s then next account
         try:
             time.sleep(NC_ACC_GAP)
         except Exception:
             pass
 
-        idx = (idx + 1) % n  # rotate through 4 accounts
+        idx = (idx + 1) % n
 
 def self_ping_loop():
     while True:
@@ -333,7 +343,6 @@ def start_bot():
             return
         clients.append(cl)
 
-    # spam loop
     try:
         t1 = threading.Thread(target=spam_loop, args=(clients, groups), daemon=True)
         t1.start()
@@ -341,7 +350,6 @@ def start_bot():
     except Exception as e:
         log(f"❌ Failed to start spam loop thread: {e}", session="system")
 
-    # nc loop
     try:
         t2 = threading.Thread(target=nc_loop, args=(clients, groups, titles_map), daemon=True)
         t2.start()
@@ -349,7 +357,6 @@ def start_bot():
     except Exception as e:
         log(f"❌ Failed to start nc loop thread: {e}", session="system")
 
-    # self-ping
     try:
         t3 = threading.Thread(target=self_ping_loop, daemon=True)
         t3.start()
