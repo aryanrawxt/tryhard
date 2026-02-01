@@ -10,13 +10,24 @@ from instagrapi import Client  # [web:38]
 # --------- CONFIG (via env) ----------
 SESSION_ID_1 = os.getenv("SESSION_ID_1")
 SESSION_ID_2 = os.getenv("SESSION_ID_2")
+SESSION_ID_3 = os.getenv("SESSION_ID_3")
+SESSION_ID_4 = os.getenv("SESSION_ID_4")
+
 GROUP_IDS = os.getenv("GROUP_IDS", "")  # comma separated thread ids
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
 
 # timings (seconds)
-DELAY_BETWEEN_MSGS = int(os.getenv("DELAY_BETWEEN_MSGS", "20"))
-TITLE_DELAY_BETWEEN_ACCOUNTS = int(os.getenv("TITLE_DELAY_BETWEEN_ACCOUNTS", "120"))
+# spam:
+#   1st acc at 1 sec, then every account switch waits 10 sec
+SPAM_START_OFFSET = 1          # first ever spam fire at t=1s
+SPAM_GAP_BETWEEN_ACCOUNTS = 10  # gap between accounts
+
+# nc:
+#   1st acc at 1 sec (nc), then 60 sec later acc2, then 120 sec later acc3, then 180 sec later acc4
+NC_START_OFFSET = 1             # first ever nc fire at t=1s
+NC_ACC_GAP = 60                 # 60s between each account's nc
+
 MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
 BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
 SELF_PING_INTERVAL = int(os.getenv("SELF_PING_INTERVAL", "60"))
@@ -31,6 +42,8 @@ MAX_SESSION_LOGS = 200
 session_logs = {
     "acc1": [],
     "acc2": [],
+    "acc3": [],
+    "acc4": [],
     "system": []
 }
 logs_lock = threading.Lock()
@@ -55,7 +68,6 @@ def health():
     return jsonify({"status": "ok", "message": "Bot process alive"})
 
 def summarize(lines):
-    # work on newest -> oldest
     rev = list(reversed(lines))
     last_login = next((l for l in rev if "Logged in" in l), None)
     last_send_ok = next((l for l in rev if "✅" in l and "sent to" in l), None)
@@ -75,12 +87,16 @@ def status():
     with logs_lock:
         acc1_logs = session_logs["acc1"][-80:]
         acc2_logs = session_logs["acc2"][-80:]
+        acc3_logs = session_logs["acc3"][-80:]
+        acc4_logs = session_logs["acc4"][-80:]
         system_last = session_logs["system"][-5:]
 
     return jsonify({
         "ok": True,
         "acc1": summarize(acc1_logs),
         "acc2": summarize(acc2_logs),
+        "acc3": summarize(acc3_logs),
+        "acc4": summarize(acc4_logs),
         "system_last": system_last
     })
 
@@ -118,7 +134,7 @@ def safe_send_message(cl, gid, msg, acc_name):
         return False
 
 def safe_change_title_direct(cl, gid, new_title, acc_name):
-    """Try the high-level instagrapi method first (if available)."""
+    """Try the high-level instagrapi method first, then GraphQL fallback."""
     try:
         tt = cl.direct_thread(int(gid))
         try:
@@ -176,85 +192,92 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
         return False
 
 # --------- Loops ----------
-def alternating_messages_loop(cl1, cl2, groups):
+def spam_loop(clients, groups):
+    """
+    spam:
+      1st acc at 1 sec then wait 10 sec -> 2nd acc then wait 10 sec -> 3rd acc then wait 10 sec ->
+      4th acc then wait 10 sec -> then back to 1st, etc.
+    """
     if not groups:
         log("⚠ No groups for messaging loop.", session="system")
         return
+
+    # initial offset so first send ~at 1s
+    time.sleep(SPAM_START_OFFSET)
+
+    idx = 0
+    n = len(clients)
     while True:
+        cl = clients[idx]
+        acc_name = f"acc{idx+1}"
+
         try:
             for gid in groups:
                 for _ in range(BURST_COUNT):
-                    ok = safe_send_message(cl1, gid, MESSAGE_TEXT, "acc1")
+                    ok = safe_send_message(cl, gid, MESSAGE_TEXT, acc_name)
                     if not ok:
                         log(
-                            f"⚠ send failed by {getattr(cl1,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s",
-                            session="acc1"
+                            f"⚠ send failed by {getattr(cl,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s",
+                            session=acc_name
                         )
                         time.sleep(COOLDOWN_ON_ERROR)
                     time.sleep(MSG_REFRESH_DELAY)
+                # small gap between groups if you want; can be removed
                 time.sleep(0.5)
         except Exception as e:
-            log(f"❌ Exception in Account1 message loop: {e}", session="acc1")
+            log(f"❌ Exception in {acc_name} message loop: {e}", session=acc_name)
+
+        # after this account finishes all groups, wait 10s then next account
         try:
-            time.sleep(DELAY_BETWEEN_MSGS)
-        except Exception:
-            pass
-        try:
-            for gid in groups:
-                for _ in range(BURST_COUNT):
-                    ok = safe_send_message(cl2, gid, MESSAGE_TEXT, "acc2")
-                    if not ok:
-                        log(
-                            f"⚠ send failed by {getattr(cl2,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s",
-                            session="acc2"
-                        )
-                        time.sleep(COOLDOWN_ON_ERROR)
-                    time.sleep(MSG_REFRESH_DELAY)
-                time.sleep(0.5)
-        except Exception as e:
-            log(f"❌ Exception in Account2 message loop: {e}", session="acc2")
-        try:
-            time.sleep(DELAY_BETWEEN_MSGS)
+            time.sleep(SPAM_GAP_BETWEEN_ACCOUNTS)
         except Exception:
             pass
 
-def alternating_title_loop(cl1, cl2, groups, titles_map):
+        idx = (idx + 1) % n  # rotate 0→1→2→3→0...
+
+def nc_loop(clients, groups, titles_map):
+    """
+    nc:
+      1st acc at 1 sec then wait 60 sec -> 2nd acc at 61 sec -> wait 60 sec ->
+      3rd acc at 121 sec -> wait 60 sec -> 4th acc at 181 sec -> wait 60 sec ->
+      then back to 1st after 240s window, etc.
+    """
     if not groups:
         log("⚠ No groups for title loop.", session="system")
         return
+
+    # first nc action around 1 second
+    time.sleep(NC_START_OFFSET)
+
+    idx = 0
+    n = len(clients)
+
     while True:
+        cl = clients[idx]
+        acc_name = f"acc{idx+1}"
+
         try:
             for gid in groups:
                 titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
                 for t in titles:
-                    ok = safe_change_title_direct(cl1, gid, t, "acc1")
+                    ok = safe_change_title_direct(cl, gid, t, acc_name)
                     if not ok:
                         log(
-                            f"⚠ Title change failed for {gid} by {getattr(cl1,'username','?')}",
-                            session="acc1"
+                            f"⚠ Title change failed for {gid} by {getattr(cl,'username','?')}",
+                            session=acc_name
                         )
-                    try:
-                        time.sleep(TITLE_DELAY_BETWEEN_ACCOUNTS)
-                    except Exception:
-                        pass
+                    # you can keep a small delay between titles in same group if needed
+                    time.sleep(1)
         except Exception as e:
-            log(f"❌ Exception in Account1 title loop: {e}", session="acc1")
+            log(f"❌ Exception in {acc_name} title loop: {e}", session=acc_name)
+
+        # after this account finishes all groups, wait 60s then next account
         try:
-            for gid in groups:
-                titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
-                for t in titles:
-                    ok = safe_change_title_direct(cl2, gid, t, "acc2")
-                    if not ok:
-                        log(
-                            f"⚠ Title change failed for {gid} by {getattr(cl2,'username','?')}",
-                            session="acc2"
-                        )
-                    try:
-                        time.sleep(TITLE_DELAY_BETWEEN_ACCOUNTS)
-                    except Exception:
-                        pass
-        except Exception as e:
-            log(f"❌ Exception in Account2 title loop: {e}", session="acc2")
+            time.sleep(NC_ACC_GAP)
+        except Exception:
+            pass
+
+        idx = (idx + 1) % n  # rotate through 4 accounts
 
 def self_ping_loop():
     while True:
@@ -269,19 +292,30 @@ def self_ping_loop():
 # --------- Start bot ----------
 def start_bot():
     log(
-        f"STARTUP: SESSION_ID_1={repr(SESSION_ID_1)}, SESSION_ID_2={repr(SESSION_ID_2)}, "
+        "STARTUP: "
+        f"SESSION_ID_1={repr(SESSION_ID_1)}, "
+        f"SESSION_ID_2={repr(SESSION_ID_2)}, "
+        f"SESSION_ID_3={repr(SESSION_ID_3)}, "
+        f"SESSION_ID_4={repr(SESSION_ID_4)}, "
         f"GROUP_IDS={repr(GROUP_IDS)}, MESSAGE_TEXT={repr(MESSAGE_TEXT)}",
         session="system"
     )
+
     s1 = decode_session(SESSION_ID_1)
     s2 = decode_session(SESSION_ID_2)
-    if not s1 or not s2:
-        log("❌ SESSION_ID_1 and SESSION_ID_2 are required in environment", session="system")
+    s3 = decode_session(SESSION_ID_3)
+    s4 = decode_session(SESSION_ID_4)
+
+    sessions = [s1, s2, s3, s4]
+    if not all(sessions):
+        log("❌ All 4 session IDs (SESSION_ID_1..4) are required in environment", session="system")
         return
+
     groups = [g.strip() for g in GROUP_IDS.split(",") if g.strip()]
     if not groups:
         log("❌ GROUP_IDS is empty or invalid", session="system")
         return
+
     titles_map = {}
     raw_titles = os.getenv("GROUP_TITLES", "")
     if raw_titles:
@@ -289,28 +323,33 @@ def start_bot():
             titles_map = json.loads(raw_titles)
         except Exception as e:
             log(f"⚠ GROUP_TITLES JSON parse error: {e}. Using fallback titles.", session="system")
-    log("🔐 Logging in account 1...", session="system")
-    cl1 = login_session(s1, "acc1")
-    if not cl1:
-        log("❌ Account 1 login failed — aborting start", session="system")
-        return
-    log("🔐 Logging in account 2...", session="system")
-    cl2 = login_session(s2, "acc2")
-    if not cl2:
-        log("❌ Account 2 login failed — aborting start", session="system")
-        return
+
+    clients = []
+    for i, s in enumerate(sessions, 1):
+        log(f"🔐 Logging in account {i}...", session="system")
+        cl = login_session(s, f"acc{i}")
+        if not cl:
+            log(f"❌ Account {i} login failed — aborting start", session="system")
+            return
+        clients.append(cl)
+
+    # spam loop
     try:
-        t1 = threading.Thread(target=alternating_messages_loop, args=(cl1, cl2, groups), daemon=True)
+        t1 = threading.Thread(target=spam_loop, args=(clients, groups), daemon=True)
         t1.start()
-        log("▶ Started alternating message thread", session="system")
+        log("▶ Started spam loop with 4 accounts (1s start, 10s gap between accounts)", session="system")
     except Exception as e:
-        log(f"❌ Failed to start message thread: {e}", session="system")
+        log(f"❌ Failed to start spam loop thread: {e}", session="system")
+
+    # nc loop
     try:
-        t2 = threading.Thread(target=alternating_title_loop, args=(cl1, cl2, groups, titles_map), daemon=True)
+        t2 = threading.Thread(target=nc_loop, args=(clients, groups, titles_map), daemon=True)
         t2.start()
-        log("▶ Started alternating title-change thread", session="system")
+        log("▶ Started nc loop with 4 accounts (1s start, 60s gap between accounts)", session="system")
     except Exception as e:
-        log(f"❌ Failed to start title thread: {e}", session="system")
+        log(f"❌ Failed to start nc loop thread: {e}", session="system")
+
+    # self-ping
     try:
         t3 = threading.Thread(target=self_ping_loop, daemon=True)
         t3.start()
