@@ -17,6 +17,9 @@ GROUP_IDS = os.getenv("GROUP_IDS", "")  # comma separated thread ids
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
 
+# NC titles: comma-separated, e.g. "hi,hello,hyy,k"
+NC_TITLES_RAW = os.getenv("NC_TITLES", "")  # optional
+
 # --------- TIMING CONFIG ----------
 # Spam:
 #   t≈1s:   acc1 spam
@@ -24,17 +27,13 @@ SELF_URL = os.getenv("SELF_URL", "")
 #   t≈21s:  acc3 spam
 #   t≈31s:  acc4 spam
 #   t≈41s:  acc1 spam again...
-SPAM_START_OFFSET = 1              # first spam action ~1s after start
-SPAM_GAP_BETWEEN_ACCOUNTS = 10     # 10s gap between accounts
+SPAM_START_OFFSET = 1
+SPAM_GAP_BETWEEN_ACCOUNTS = 10  # seconds
 
-# NC (title change):
-#   t≈1s:   acc1 nc
-#   t≈61s:  acc2 nc
-#   t≈121s: acc3 nc
-#   t≈181s: acc4 nc
-#   t≈241s: acc1 nc again...
-NC_START_OFFSET = 1                # first nc action ~1s after start
-NC_ACC_GAP = 60                    # 60s gap between accounts
+# NC (title change) – 3 minute full cycle:
+# 4 accounts → 180s / 4 = 45s gap between accounts
+NC_START_OFFSET = 1
+NC_ACC_GAP = 45  # seconds
 
 MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
 BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
@@ -119,7 +118,6 @@ def decode_session(session):
 
 # --------- Instagram helpers ----------
 def login_session(session_id, name_hint=""):
-    """Log in using sessionid; returns Client or None"""
     session_id = decode_session(session_id)
     try:
         cl = Client()
@@ -132,7 +130,6 @@ def login_session(session_id, name_hint=""):
         return None
 
 def safe_send_message(cl, gid, msg, acc_name):
-    """Send message and handle exceptions"""
     try:
         cl.direct_send(msg, thread_ids=[int(gid)])  # [web:16]
         log(f"✅ {getattr(cl,'username','?')} sent to {gid}", session=acc_name)
@@ -142,7 +139,6 @@ def safe_send_message(cl, gid, msg, acc_name):
         return False
 
 def safe_change_title_direct(cl, gid, new_title, acc_name):
-    """Try high-level update_title, then GraphQL fallback."""
     try:
         tt = cl.direct_thread(int(gid))  # [web:16]
         try:
@@ -202,14 +198,6 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
 
 # --------- Loops ----------
 def spam_loop(clients, groups):
-    """
-    Spam rotation (per group list):
-      t≈1s:   acc1
-      t≈11s:  acc2
-      t≈21s:  acc3
-      t≈31s:  acc4
-      t≈41s:  acc1 again...
-    """
     if not groups:
         log("⚠ No groups for messaging loop.", session="system")
         return
@@ -244,19 +232,25 @@ def spam_loop(clients, groups):
 
         idx = (idx + 1) % n
 
+def parse_nc_titles():
+    """
+    Returns a list of 4 titles, one per account.
+    If NC_TITLES_RAW has fewer than 4, it pads with MESSAGE_TEXT[:40].
+    """
+    base = [t.strip() for t in NC_TITLES_RAW.split(",") if t.strip()]
+    default_title = MESSAGE_TEXT[:40] or "NC"
+    while len(base) < 4:
+        base.append(default_title)
+    return base[:4]
+
 def nc_loop(clients, groups, titles_map):
-    """
-    NC rotation (per group list):
-      t≈1s:   acc1
-      t≈61s:  acc2
-      t≈121s: acc3
-      t≈181s: acc4
-      t≈241s: acc1 again...
-    Only one account acts at a time; others wait.
-    """
     if not groups:
         log("⚠ No groups for title loop.", session="system")
         return
+
+    # one fixed NC title per account from env
+    per_account_titles = parse_nc_titles()
+    log(f"NC titles per account: {per_account_titles}", session="system")
 
     time.sleep(NC_START_OFFSET)
 
@@ -266,11 +260,12 @@ def nc_loop(clients, groups, titles_map):
     while True:
         cl = clients[idx]
         acc_name = f"acc{idx+1}"
+        account_title = per_account_titles[idx]
 
         try:
             for gid in groups:
-                titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [MESSAGE_TEXT[:40]]
-                # one title per turn to match your timing style
+                # group-specific titles_map has priority; if not set, use account_title
+                titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [account_title]
                 t = titles[0]
                 ok = safe_change_title_direct(cl, gid, t, acc_name)
                 if not ok:
@@ -307,7 +302,8 @@ def start_bot():
         f"SESSION_ID_2={repr(SESSION_ID_2)}, "
         f"SESSION_ID_3={repr(SESSION_ID_3)}, "
         f"SESSION_ID_4={repr(SESSION_ID_4)}, "
-        f"GROUP_IDS={repr(GROUP_IDS)}, MESSAGE_TEXT={repr(MESSAGE_TEXT)}",
+        f"GROUP_IDS={repr(GROUP_IDS)}, MESSAGE_TEXT={repr(MESSAGE_TEXT)}, "
+        f"NC_TITLES={repr(NC_TITLES_RAW)}",
         session="system"
     )
 
@@ -353,7 +349,7 @@ def start_bot():
     try:
         t2 = threading.Thread(target=nc_loop, args=(clients, groups, titles_map), daemon=True)
         t2.start()
-        log("▶ Started nc loop with 4 accounts (1s start, 60s gap between accounts)", session="system")
+        log("▶ Started nc loop with 4 accounts (1s start, 45s gap between accounts, 3-min full cycle)", session="system")
     except Exception as e:
         log(f"❌ Failed to start nc loop thread: {e}", session="system")
 
