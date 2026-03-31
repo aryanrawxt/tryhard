@@ -18,10 +18,10 @@ GROUP_IDS = os.getenv("GROUP_IDS", "")  # comma separated thread ids
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
 NC_TITLES_RAW = os.getenv("NC_TITLES", "") 
-SPAM_START_OFFSET = 1
-SPAM_GAP_BETWEEN_ACCOUNTS = 10
-NC_START_OFFSET = 1
-NC_ACC_GAP = 45
+SPAM_START_OFFSET = int(os.getenv("SPAM_START_OFFSET", "1"))
+SPAM_GAP_BETWEEN_ACCOUNTS = int(os.getenv("SPAM_GAP_BETWEEN_ACCOUNTS", "6"))
+NC_START_OFFSET = int(os.getenv("NC_START_OFFSET", "1"))
+NC_ACC_GAP = int(os.getenv("NC_ACC_GAP", "30"))
 
 MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
 BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
@@ -229,9 +229,9 @@ def parse_nc_titles():
     """
     base = [t.strip() for t in NC_TITLES_RAW.split(",") if t.strip()]
     default_title = MESSAGE_TEXT[:40] or "NC"
-    while len(base) < 4:
+    while len(base) < 6:
         base.append(default_title)
-    return base[:4]
+    return base[:6]
 
 def nc_loop(clients, groups, titles_map):
     if not groups:
