@@ -37,6 +37,8 @@ session_logs = {
     "acc2": [],
     "acc3": [],
     "acc4": [],
+    "acc5": [],
+    "acc6": [],
     "system": []
 }
 logs_lock = threading.Lock()
@@ -187,7 +189,7 @@ def safe_change_title_direct(cl, gid, new_title, acc_name):
         return False
 
 # --------- Loops ----------
-def spam_loop(clients, groups):
+def spam_loop(accounts, groups):
     if not groups:
         log("⚠ No groups for messaging loop.", session="system")
         return
@@ -195,32 +197,38 @@ def spam_loop(clients, groups):
     time.sleep(SPAM_START_OFFSET)
 
     idx = 0
-    n = len(clients)
+    n = len(accounts)
+
     while True:
-        cl = clients[idx]
-        acc_name = f"acc{idx+1}"
+        acc = accounts[idx]
+        acc_name = acc["name"]
 
         try:
-            for gid in groups:
-                for _ in range(BURST_COUNT):
-                    ok = safe_send_message(cl, gid, MESSAGE_TEXT, acc_name)
-                    if not ok:
-                        log(
-                            f"⚠ send failed by {getattr(cl,'username','?')}, cooling down {COOLDOWN_ON_ERROR}s",
-                            session=acc_name
-                        )
-                        time.sleep(COOLDOWN_ON_ERROR)
-                    time.sleep(MSG_REFRESH_DELAY)
-                time.sleep(0.5)
+            if not acc["active"] or not acc["client"]:
+                log(f"⏭ {acc_name} inactive, skipping message slot", session=acc_name)
+            else:
+                cl = acc["client"]
+                for gid in groups:
+                    for _ in range(BURST_COUNT):
+                        ok = safe_send_message(cl, gid, MESSAGE_TEXT, acc_name)
+                        if not ok:
+                            log(f"⛔ {acc_name} failed, disabling account for message loop", session=acc_name)
+                            acc["active"] = False
+                            break
+                        time.sleep(MSG_REFRESH_DELAY)
+
+                    if not acc["active"]:
+                        break
+
+                    time.sleep(0.5)
+
         except Exception as e:
             log(f"❌ Exception in {acc_name} message loop: {e}", session=acc_name)
+            acc["active"] = False
 
-        try:
-            time.sleep(SPAM_GAP_BETWEEN_ACCOUNTS)
-        except Exception:
-            pass
-
+        time.sleep(SPAM_GAP_BETWEEN_ACCOUNTS)
         idx = (idx + 1) % n
+
 
 def parse_nc_titles():
     """
@@ -233,46 +241,48 @@ def parse_nc_titles():
         base.append(default_title)
     return base[:6]
 
-def nc_loop(clients, groups, titles_map):
+def nc_loop(accounts, groups, titles_map):
     if not groups:
         log("⚠ No groups for title loop.", session="system")
         return
 
-    # one fixed NC title per account from env
     per_account_titles = parse_nc_titles()
     log(f"NC titles per account: {per_account_titles}", session="system")
 
     time.sleep(NC_START_OFFSET)
 
     idx = 0
-    n = len(clients)
+    n = len(accounts)
 
     while True:
-        cl = clients[idx]
-        acc_name = f"acc{idx+1}"
+        acc = accounts[idx]
+        acc_name = acc["name"]
         account_title = per_account_titles[idx]
 
         try:
-            for gid in groups:
-                # group-specific titles_map has priority; if not set, use account_title
-                titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [account_title]
-                t = titles[0]
-                ok = safe_change_title_direct(cl, gid, t, acc_name)
-                if not ok:
-                    log(
-                        f"⚠ Title change failed for {gid} by {getattr(cl,'username','?')}",
-                        session=acc_name
-                    )
-                time.sleep(1)
+            if not acc["active"] or not acc["client"]:
+                log(f"⏭ {acc_name} inactive, skipping nc slot", session=acc_name)
+            else:
+                cl = acc["client"]
+                for gid in groups:
+                    titles = titles_map.get(str(gid)) or titles_map.get(int(gid)) or [account_title]
+                    t = titles[0]
+
+                    ok = safe_change_title_direct(cl, gid, t, acc_name)
+                    if not ok:
+                        log(f"⛔ {acc_name} failed, disabling account for nc loop", session=acc_name)
+                        acc["active"] = False
+                        break
+
+                    time.sleep(1)
+
         except Exception as e:
-            log(f"❌ Exception in {acc_name} title loop: {e}", session=acc_name)
+            log(f"❌ Exception in {acc_name} nc loop: {e}", session=acc_name)
+            acc["active"] = False
 
-        try:
-            time.sleep(NC_ACC_GAP)
-        except Exception:
-            pass
-
+        time.sleep(NC_ACC_GAP)
         idx = (idx + 1) % n
+
 
 def self_ping_loop():
     while True:
@@ -284,7 +294,6 @@ def self_ping_loop():
                 log(f"⚠ Self ping failed: {e}", session="system")
         time.sleep(SELF_PING_INTERVAL)
 
-# --------- Start bot ----------
 def start_bot():
     log(
         "STARTUP: "
@@ -299,17 +308,14 @@ def start_bot():
         session="system"
     )
 
-    s1 = decode_session(SESSION_ID_1)
-    s2 = decode_session(SESSION_ID_2)
-    s3 = decode_session(SESSION_ID_3)
-    s4 = decode_session(SESSION_ID_4)
-    s5 = decode_session(SESSION_ID_5)
-    s6 = decode_session(SESSION_ID_6)
-
-    sessions = [s1, s2, s3, s4, s5, s6]
-    if not all(sessions):
-        log("❌ All 4 session IDs (SESSION_ID_1..6) are required in environment", session="system")
-        return
+    sessions = [
+        decode_session(SESSION_ID_1),
+        decode_session(SESSION_ID_2),
+        decode_session(SESSION_ID_3),
+        decode_session(SESSION_ID_4),
+        decode_session(SESSION_ID_5),
+        decode_session(SESSION_ID_6),
+    ]
 
     groups = [g.strip() for g in GROUP_IDS.split(",") if g.strip()]
     if not groups:
@@ -324,26 +330,46 @@ def start_bot():
         except Exception as e:
             log(f"⚠ GROUP_TITLES JSON parse error: {e}. Using fallback titles.", session="system")
 
-    clients = []
+    accounts = []
     for i, s in enumerate(sessions, 1):
+        acc_name = f"acc{i}"
+        if not s:
+            log(f"⚠ No session for {acc_name}, keeping slot inactive", session=acc_name)
+            accounts.append({"name": acc_name, "client": None, "active": False})
+            continue
+
         log(f"🔐 Logging in account {i}...", session="system")
-        cl = login_session(s, f"acc{i}")
-        if not cl:
-            log(f"❌ Account {i} login failed — aborting start", session="system")
-            return
-        clients.append(cl)
+        cl = login_session(s, acc_name)
+        if cl:
+            accounts.append({"name": acc_name, "client": cl, "active": True})
+        else:
+            log(f"⚠ {acc_name} login failed, keeping slot inactive", session=acc_name)
+            accounts.append({"name": acc_name, "client": None, "active": False})
+
+    # if ALL six are inactive, no point starting loops
+    if not any(a["active"] for a in accounts):
+        log("❌ No accounts logged in, aborting.", session="system")
+        return
 
     try:
-        t1 = threading.Thread(target=spam_loop, args=(clients, groups), daemon=True)
+        t1 = threading.Thread(target=spam_loop, args=(accounts, groups), daemon=True)
         t1.start()
-        log("▶ Started spam loop with 6 accounts (1s start, 10s gap between accounts)", session="system")
+        log(
+            "▶ Started spam loop with 6 slots "
+            f"({SPAM_START_OFFSET}s start, {SPAM_GAP_BETWEEN_ACCOUNTS}s gap between slots)",
+            session="system"
+        )
     except Exception as e:
         log(f"❌ Failed to start spam loop thread: {e}", session="system")
 
     try:
-        t2 = threading.Thread(target=nc_loop, args=(clients, groups, titles_map), daemon=True)
+        t2 = threading.Thread(target=nc_loop, args=(accounts, groups, titles_map), daemon=True)
         t2.start()
-        log("▶ Started nc loop with 6 accounts (1s start, 45s gap between accounts, 3-min full cycle)", session="system")
+        log(
+            "▶ Started nc loop with 6 slots "
+            f"({NC_START_OFFSET}s start, {NC_ACC_GAP}s gap between slots)",
+            session="system"
+        )
     except Exception as e:
         log(f"❌ Failed to start nc loop thread: {e}", session="system")
 
@@ -353,7 +379,7 @@ def start_bot():
     except Exception as e:
         log(f"⚠ Failed to start self-ping thread: {e}", session="system")
 
-# -------------------------------------------------
+
 def run_bot_once():
     try:
         threading.Thread(target=start_bot, daemon=True).start()
