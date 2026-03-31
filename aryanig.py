@@ -12,28 +12,16 @@ SESSION_ID_1 = os.getenv("SESSION_ID_1")
 SESSION_ID_2 = os.getenv("SESSION_ID_2")
 SESSION_ID_3 = os.getenv("SESSION_ID_3")
 SESSION_ID_4 = os.getenv("SESSION_ID_4")
-
+SESSION_ID_5 = os.getenv("SESSION_ID_5")
+SESSION_ID_6 = os.getenv("SESSION_ID_6")
 GROUP_IDS = os.getenv("GROUP_IDS", "")  # comma separated thread ids
 MESSAGE_TEXT = os.getenv("MESSAGE_TEXT", "Hello 👋")
 SELF_URL = os.getenv("SELF_URL", "")
-
-# NC titles: comma-separated, e.g. "hi,hello,hyy,k"
-NC_TITLES_RAW = os.getenv("NC_TITLES", "")  # optional
-
-# --------- TIMING CONFIG ----------
-# Spam:
-#   t≈1s:   acc1 spam
-#   t≈11s:  acc2 spam
-#   t≈21s:  acc3 spam
-#   t≈31s:  acc4 spam
-#   t≈41s:  acc1 spam again...
+NC_TITLES_RAW = os.getenv("NC_TITLES", "") 
 SPAM_START_OFFSET = 1
-SPAM_GAP_BETWEEN_ACCOUNTS = 10  # seconds
-
-# NC (title change) – 3 minute full cycle:
-# 4 accounts → 180s / 4 = 45s gap between accounts
+SPAM_GAP_BETWEEN_ACCOUNTS = 10
 NC_START_OFFSET = 1
-NC_ACC_GAP = 45  # seconds
+NC_ACC_GAP = 45
 
 MSG_REFRESH_DELAY = int(os.getenv("MSG_REFRESH_DELAY", "1"))
 BURST_COUNT = int(os.getenv("BURST_COUNT", "1"))
@@ -43,8 +31,6 @@ DOC_ID = os.getenv("DOC_ID", "29088580780787855")
 CSRF_TOKEN = os.getenv("CSRF_TOKEN", "")
 
 app = Flask(__name__)
-
-# --------- PER-SESSION LOG STORAGE ----------
 MAX_SESSION_LOGS = 200
 session_logs = {
     "acc1": [],
@@ -63,13 +49,13 @@ def _push_log(session, msg):
         if len(session_logs[session]) > MAX_SESSION_LOGS:
             session_logs[session].pop(0)
 
-# --------- Logging helper ----------
+
 def log(msg, session="system"):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line, flush=True)
     _push_log(session, msg)
 
-# --------- Routes ----------
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "message": "Bot process alive"})
@@ -96,6 +82,8 @@ def status():
         acc2_logs = session_logs["acc2"][-80:]
         acc3_logs = session_logs["acc3"][-80:]
         acc4_logs = session_logs["acc4"][-80:]
+        acc5_logs = session_logs["acc5"][-80:]
+        acc6_logs = session_logs["acc6"][-80:]   
         system_last = session_logs["system"][-5:]
 
     return jsonify({
@@ -104,6 +92,8 @@ def status():
         "acc2": summarize(acc2_logs),
         "acc3": summarize(acc3_logs),
         "acc4": summarize(acc4_logs),
+        "acc5": summarize(acc5_logs),
+        "acc6": summarize(acc6_logs),
         "system_last": system_last
     })
 
@@ -302,6 +292,8 @@ def start_bot():
         f"SESSION_ID_2={repr(SESSION_ID_2)}, "
         f"SESSION_ID_3={repr(SESSION_ID_3)}, "
         f"SESSION_ID_4={repr(SESSION_ID_4)}, "
+        f"SESSION_ID_5={repr(SESSION_ID_5)}, "
+        f"SESSION_ID_6={repr(SESSION_ID_6)}, "
         f"GROUP_IDS={repr(GROUP_IDS)}, MESSAGE_TEXT={repr(MESSAGE_TEXT)}, "
         f"NC_TITLES={repr(NC_TITLES_RAW)}",
         session="system"
@@ -311,10 +303,12 @@ def start_bot():
     s2 = decode_session(SESSION_ID_2)
     s3 = decode_session(SESSION_ID_3)
     s4 = decode_session(SESSION_ID_4)
+    s5 = decode_session(SESSION_ID_5)
+    s6 = decode_session(SESSION_ID_6)
 
-    sessions = [s1, s2, s3, s4]
+    sessions = [s1, s2, s3, s4, s5, s6]
     if not all(sessions):
-        log("❌ All 4 session IDs (SESSION_ID_1..4) are required in environment", session="system")
+        log("❌ All 4 session IDs (SESSION_ID_1..6) are required in environment", session="system")
         return
 
     groups = [g.strip() for g in GROUP_IDS.split(",") if g.strip()]
@@ -342,14 +336,14 @@ def start_bot():
     try:
         t1 = threading.Thread(target=spam_loop, args=(clients, groups), daemon=True)
         t1.start()
-        log("▶ Started spam loop with 4 accounts (1s start, 10s gap between accounts)", session="system")
+        log("▶ Started spam loop with 6 accounts (1s start, 10s gap between accounts)", session="system")
     except Exception as e:
         log(f"❌ Failed to start spam loop thread: {e}", session="system")
 
     try:
         t2 = threading.Thread(target=nc_loop, args=(clients, groups, titles_map), daemon=True)
         t2.start()
-        log("▶ Started nc loop with 4 accounts (1s start, 45s gap between accounts, 3-min full cycle)", session="system")
+        log("▶ Started nc loop with 6 accounts (1s start, 45s gap between accounts, 3-min full cycle)", session="system")
     except Exception as e:
         log(f"❌ Failed to start nc loop thread: {e}", session="system")
 
