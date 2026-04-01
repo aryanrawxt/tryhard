@@ -204,7 +204,10 @@ def spam_loop(accounts, groups):
         acc_name = acc["name"]
 
         try:
-            if not acc["active"] or not acc["client"]:
+            # cooldown check
+            if acc.get("cooldown_until", 0) > time.time():
+                log(f"⏳ {acc_name} cooling down", session=acc_name)
+            elif not acc["active"] or not acc["client"]:
                 log(f"⏭ {acc_name} inactive, skipping message slot", session=acc_name)
             else:
                 cl = acc["client"]
@@ -212,19 +215,19 @@ def spam_loop(accounts, groups):
                     for _ in range(BURST_COUNT):
                         ok = safe_send_message(cl, gid, MESSAGE_TEXT, acc_name)
                         if not ok:
-                            log(f"⛔ {acc_name} failed, disabling account for message loop", session=acc_name)
-                            acc["active"] = False
+                            log(f"⛔ {acc_name} failed, applying cooldown for message loop", session=acc_name)
+                            acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
                             break
                         time.sleep(MSG_REFRESH_DELAY)
 
-                    if not acc["active"]:
+                    if acc.get("cooldown_until", 0) > time.time():
                         break
 
                     time.sleep(0.5)
 
         except Exception as e:
             log(f"❌ Exception in {acc_name} message loop: {e}", session=acc_name)
-            acc["active"] = False
+            acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
 
         time.sleep(SPAM_GAP_BETWEEN_ACCOUNTS)
         idx = (idx + 1) % n
@@ -260,7 +263,10 @@ def nc_loop(accounts, groups, titles_map):
         account_title = per_account_titles[idx]
 
         try:
-            if not acc["active"] or not acc["client"]:
+            # cooldown check
+            if acc.get("cooldown_until", 0) > time.time():
+                log(f"⏳ {acc_name} cooling down", session=acc_name)
+            elif not acc["active"] or not acc["client"]:
                 log(f"⏭ {acc_name} inactive, skipping nc slot", session=acc_name)
             else:
                 cl = acc["client"]
@@ -270,15 +276,15 @@ def nc_loop(accounts, groups, titles_map):
 
                     ok = safe_change_title_direct(cl, gid, t, acc_name)
                     if not ok:
-                        log(f"⛔ {acc_name} failed, disabling account for nc loop", session=acc_name)
-                        acc["active"] = False
+                        log(f"⛔ {acc_name} failed, applying cooldown for nc loop", session=acc_name)
+                        acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
                         break
 
                     time.sleep(1)
 
         except Exception as e:
             log(f"❌ Exception in {acc_name} nc loop: {e}", session=acc_name)
-            acc["active"] = False
+            acc["cooldown_until"] = time.time() + COOLDOWN_ON_ERROR
 
         time.sleep(NC_ACC_GAP)
         idx = (idx + 1) % n
@@ -335,19 +341,19 @@ def start_bot():
         acc_name = f"acc{i}"
         if not s:
             log(f"⚠ No session for {acc_name}, keeping slot inactive", session=acc_name)
-            accounts.append({"name": acc_name, "client": None, "active": False})
+            accounts.append({"name": acc_name, "client": None, "active": False, "cooldown_until": 0})
             continue
 
         log(f"🔐 Logging in account {i}...", session="system")
         cl = login_session(s, acc_name)
         if cl:
-            accounts.append({"name": acc_name, "client": cl, "active": True})
+            accounts.append({"name": acc_name, "client": cl, "active": True, "cooldown_until": 0})
         else:
             log(f"⚠ {acc_name} login failed, keeping slot inactive", session=acc_name)
-            accounts.append({"name": acc_name, "client": None, "active": False})
+            accounts.append({"name": acc_name, "client": None, "active": False, "cooldown_until": 0})
 
-    # if ALL six are inactive, no point starting loops
-    if not any(a["active"] for a in accounts):
+    # if ALL six are really inactive (no client), no point starting loops
+    if not any(a["client"] for a in accounts):
         log("❌ No accounts logged in, aborting.", session="system")
         return
 
